@@ -15,7 +15,7 @@ from src.event_bus import EventBus
 logger = logging.getLogger(__name__)
 
 # regex patterns
-# Updated chat regex to capture SteamID
+# Updated chat regex to capture SteamID (Full Format)
 # Example: *DEAD* Player Name<U:1:12345><Blue> : !command args
 CHAT_REGEX_FULL = re.compile(r"^(?:\*?(?:DEAD|TEAM|SPEC)\*? )?(?P<user>.+?)<(?P<steamid>U:\d+:\d+)>(?:<(?P<team>Red|Blue|Spectator|Console)>)? : (?P<message>.+)$") # Made team tag optional
 CHAT_REGEX_SIMPLE = re.compile(r"^(?P<user>[^:]+?) : (?P<message>.+)$") # Simple format: User : Message
@@ -183,6 +183,10 @@ class LogReader:
         user_info = None
         message = None
 
+        # Variables to store extracted data
+        raw_user_name = None
+        steamid = None
+        team = None
         # 1a. Try matching the full format (with SteamID)
         match_full = CHAT_REGEX_FULL.match(line)
         if match_full:
@@ -190,39 +194,40 @@ class LogReader:
             message = (match_full.group('message') or "").strip()
             steamid = match_full.group('steamid')
             team = match_full.group('team') # Might be None if optional part didn't match
-
-            # Determine tags based on line start (as before)
-            tags = None # Reset tags for this match attempt
-            user_name = user # Start with potentially tagged name
-            tag_prefix = None
-            if line.startswith("*DEAD* "): tag_prefix = "*DEAD* "
-            elif line.startswith("*TEAM* "): tag_prefix = "*TEAM* "
-            elif line.startswith("[TEAM] "): tag_prefix = "[TEAM] "
-            elif line.startswith("*SPEC* "): tag_prefix = "*SPEC* "
-            elif line.startswith("[SPEC] "): tag_prefix = "[SPEC] "
-            elif line.startswith("[DEAD] "): tag_prefix = "[DEAD] "
-
-            if tag_prefix:
-                tags = tag_prefix.strip()
-                if user_name.startswith(tag_prefix):
-                    user_name = user_name[len(tag_prefix):].strip()
-                else:
-                    logger.warning(f"Tag prefix '{tag_prefix}' detected but not found at start of user '{user}'. Stripping tag only.")
-                    user_name = user_name.replace(tags, "").strip()
-
-            if not user_name:
-                logger.warning(f"Could not extract final user name from full chat line: {line}")
-            else:
-                user_info = {"name": user_name, "steamid": steamid, "tags": tags, "team": team}
+            raw_user_name = user # Store potentially tagged name
 
         # 1b. If full format didn't match, try simple format
-        elif not user_info:
+        else: # No need for elif not user_info, just try simple if full failed
             match_simple = CHAT_REGEX_SIMPLE.match(line)
             if match_simple:
-                user_name = (match_simple.group('user') or "").strip()
+                user = (match_simple.group('user') or "").strip()
                 message = (match_simple.group('message') or "").strip()
-                if user_name: # Ensure user name is not empty
-                    user_info = {"name": user_name, "steamid": None, "tags": None, "team": None}
+                raw_user_name = user # Store potentially tagged name
+                steamid = None # No steamid in simple format
+                team = None    # No team in simple format
+
+        # --- If any chat format matched, clean username and create user_info ---
+        if raw_user_name is not None and message is not None:
+            # Apply tag stripping to raw_user_name
+            user_name = raw_user_name # Start with raw name
+            tags = None
+            possible_tags = ["*DEAD*", "*TEAM*", "[TEAM]", "*SPEC*", "[SPEC]", "[DEAD]"]
+            for tag in possible_tags:
+                if user_name.startswith(tag + " "):
+                    tags = tag
+                    user_name = user_name[len(tag)+1:].strip()
+                    break
+                elif user_name.startswith(tag):
+                    tags = tag
+                    user_name = user_name[len(tag):].strip()
+                    break
+
+            if not user_name: # Safety check after stripping
+                logger.warning(f"Could not extract final user name after stripping tags from: {raw_user_name}")
+                return # Cannot proceed without a username
+
+            # Create the final user_info dict
+            user_info = {"name": user_name, "steamid": steamid, "tags": tags, "team": team}
 
         # --- Process if a chat format matched ---
         if user_info and message is not None:
