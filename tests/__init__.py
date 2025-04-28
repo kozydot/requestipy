@@ -1,1 +1,1 @@
-# Test package for RequestifyPy
+# test package for requestifypy

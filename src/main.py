@@ -3,7 +3,7 @@ import os
 import time
 import logging
 
-# Add project root to path for easier imports
+# add project root to path so we can import stuff easier
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
@@ -15,57 +15,57 @@ from src.command_manager import CommandManager
 from src.executor import Executor
 from src.audio_player import AudioPlayer
 from src.plugin_manager import PluginManager
-import src.core_commands as core_commands # Import the core commands module
+import src.core_commands as core_commands # import our basic commands
 
 
 
 def main():
-    """Main function to initialize and run RequestifyPy."""
-    # Load configuration first
+    """main function to initialize and run requestipy."""
+    # load the config file first, kinda important
     config = load_config()
     if not config:
-        print("ERROR: Failed to load configuration. Exiting.")
+        print("error: failed to load configuration. exiting.")
         sys.exit(1)
 
-    # Setup logging based on config
-    setup_logging(config.get('log_level', 'INFO')) # Default to INFO if not set
+    # set up logging using the config settings
+    setup_logging(config.get('log_level', 'INFO')) # default to info level if it's not in the config
 
-    logging.info("Starting RequestifyPy...")
-    logging.info("Configuration loaded.")
+    logging.info("starting requestipy...")
+    logging.info("configuration loaded.")
 
-    # Initialize core components
+    # get the main parts ready
     event_bus = EventBus()
     log_reader = LogReader(config, event_bus)
     command_manager = CommandManager(event_bus)
-    executor = Executor(config, command_manager, event_bus) # Pass config too
-    audio_player = AudioPlayer(config, event_bus) # Pass config and event_bus
-    plugin_manager = PluginManager(command_manager, event_bus) # Uses default 'plugins' dir
+    executor = Executor(config, command_manager, event_bus) # executor needs the config too
+    audio_player = AudioPlayer(config, event_bus) # audio player needs config and the event bus
+    plugin_manager = PluginManager(command_manager, event_bus) # uses the default 'plugins' folder
 
-    # Register core commands
+    # register the basic commands
     core_commands.register(command_manager, audio_player)
-    logging.info("Core commands registered.")
+    logging.info("core commands registered.")
 
-    # Load plugins (after core commands are registered)
+    # load plugins after the basic commands are ready
     plugin_manager.load_plugins()
-    logging.info("Plugins loaded.")
+    logging.info("plugins loaded.")
 
-    # Start log monitoring
+    # start watching the log file
     log_reader.start_monitoring()
-    logging.info("Log monitoring started.")
+    logging.info("log monitoring started.")
 
-    # Keep the main thread alive
+    # keep the main script running
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("Shutting down RequestifyPy...")
-        # Add shutdown logic (in reverse order of startup if dependencies exist)
+        logging.info("shutting down requestipy...")
+        # shut things down nicely, kinda in reverse order of startup
         log_reader.stop_monitoring()
         audio_player.shutdown()
-        plugin_manager.unload_plugins() # Call unload for plugins
-        # core_commands.unregister(command_manager) # Optional: Unregister core commands if needed
-        # executor.shutdown() # Executor currently doesn't require explicit shutdown
-        print("RequestifyPy stopped.")
+        plugin_manager.unload_plugins() # unload the plugins
+        # core_commands.unregister(command_manager) # optional: unregister basic commands if we need to
+        # executor.shutdown() # executor doesn't need a special shutdown right now
+        print("requestipy stopped.")
 
 if __name__ == "__main__":
     main()

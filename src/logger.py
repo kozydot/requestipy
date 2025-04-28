@@ -1,23 +1,23 @@
 import logging
 import sys
-from collections import deque # Import deque
-import hashlib # Import hashlib
+from collections import deque # import deque
+import hashlib # import hashlib
 
-LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s' # Add LOG_FORMAT back
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s' # add log_format back
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-# --- Duplicate Log Filter ---
-# Cache size for duplicate detection
-DUPLICATE_CACHE_SIZE = 10 # How many recent messages to remember
+# --- duplicate log filter ---
+# cache size for duplicate detection
+DUPLICATE_CACHE_SIZE = 10 # how many recent messages to remember
 
 class DuplicateFilter(logging.Filter):
-    """Filters out log records identical to the last one within the cache size."""
+    """filters out log records identical to the last one within the cache size."""
     def __init__(self, name=""):
         super().__init__(name)
         self._cache: deque[str] = deque(maxlen=DUPLICATE_CACHE_SIZE)
 
     def filter(self, record):
-        # Create a hash based on level and message content
+        # create a hash based on level and message content
         log_string = f"{record.levelno}-{record.msg}"
         log_hash = hashlib.sha1(log_string.encode()).hexdigest()
 
@@ -25,13 +25,13 @@ class DuplicateFilter(logging.Filter):
         if not is_duplicate:
             self._cache.append(log_hash)
 
-        # Return False to filter out (suppress) the record if it's a duplicate
+        # return false to filter out (suppress) the record if it's a duplicate
         return not is_duplicate
 
-# --- End Duplicate Log Filter ---
+# --- end duplicate log filter ---
 
 
-# Set default level back to INFO
+# set default level back to info
 def setup_logging(log_level_str: str = 'INFO', log_file: str = None):
     """Configures the root logger.
 
@@ -41,48 +41,48 @@ def setup_logging(log_level_str: str = 'INFO', log_file: str = None):
     """
     log_level = getattr(logging, log_level_str.upper(), logging.INFO)
 
-    # Create formatter
+    # create formatter
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
 
-    # Get root logger
+    # get root logger
     logger = logging.getLogger()
     logger.setLevel(log_level)
 
-    # Clear existing handlers (important if this function is called multiple times)
+    # clear existing handlers (important if this function is called multiple times)
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    # Configure console handler
+    # configure console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
-    # Add the duplicate filter to the console handler
+    # add the duplicate filter to the console handler
     console_handler.addFilter(DuplicateFilter())
     logger.addHandler(console_handler)
 
 
-    # Configure file handler if path is provided
+    # configure file handler if path is provided
     if log_file:
         try:
             file_handler = logging.FileHandler(log_file, encoding='utf-8')
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
-            logging.info(f"Logging to file: {log_file}")
+            logging.info(f"logging to file: {log_file}")
         except IOError as e:
-            logging.error(f"Failed to set up log file handler at {log_file}: {e}", exc_info=False)
+            logging.error(f"failed to set up log file handler at {log_file}: {e}", exc_info=False)
 
-    logging.info(f"Logging setup complete. Level set to {log_level_str.upper()}")
+    logging.info(f"logging setup complete. level set to {log_level_str.upper()}")
 
-# Example usage (can be removed or kept for testing)
+# example usage (can be removed or kept for testing)
 if __name__ == '__main__':
-    # Test different levels and file logging
+    # test different levels and file logging
     setup_logging('DEBUG', 'requestify_debug.log')
-    logging.debug("This is a debug message.")
-    logging.info("This is an info message.")
-    logging.warning("This is a warning message.")
-    logging.error("This is an error message.")
-    logging.critical("This is a critical message.")
+    logging.debug("this is a debug message.")
+    logging.info("this is an info message.")
+    logging.warning("this is a warning message.")
+    logging.error("this is an error message.")
+    logging.critical("this is a critical message.")
 
-    print("\nSwitching to INFO level, console only...")
+    print("\nswitching to info level, console only...")
     setup_logging('INFO')
-    logging.debug("This debug message should NOT appear.")
-    logging.info("This info message should appear.")
+    logging.debug("this debug message should not appear.")
+    logging.info("this info message should appear.")

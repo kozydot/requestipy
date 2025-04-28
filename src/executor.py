@@ -2,110 +2,110 @@ import logging
 import threading
 from typing import Dict, List, Any
 
-# Assuming EventBus and CommandManager are accessible
+# assuming eventbus and commandmanager are accessible
 from src.event_bus import EventBus
 from src.command_manager import CommandManager, Command
-from src.log_reader import EVENT_COMMAND_DETECTED # Import event name
+from src.log_reader import EVENT_COMMAND_DETECTED # import event name
 
 logger = logging.getLogger(__name__)
 
 class Executor:
-    """Listens for command events and executes them using CommandManager."""
+    """listens for command events and executes them using commandmanager."""
 
     def __init__(self, config: Dict[str, Any], command_manager: CommandManager, event_bus: EventBus):
-        self._config = config # Store config
+        self._config = config # store config
         self._command_manager = command_manager
         self._event_bus = event_bus
         self._subscribe_to_events()
         logger.info("Executor initialized and subscribed to events.")
 
     def _subscribe_to_events(self):
-        """Subscribes the command execution handler to the relevant event."""
+        """subscribes the command execution handler to the relevant event."""
         self._event_bus.subscribe(EVENT_COMMAND_DETECTED, self.handle_command_event)
-        logger.debug(f"Executor subscribed to '{EVENT_COMMAND_DETECTED}' event.")
+        logger.debug(f"executor subscribed to '{EVENT_COMMAND_DETECTED}' event.")
 
     def handle_command_event(self, user: Dict[str, Any], command: str, args: List[str]):
-        """Handles the command detected event."""
-        # Log the raw user dict received
-        logger.debug(f"Executor received command event: Raw User Dict={user}, Command={command}, Args={args}")
+        """handles the command detected event."""
+        # log the raw user dict received
+        logger.debug(f"executor received command event: raw user dict={user}, command={command}, args={args}")
 
-        # Command name from event includes the prefix '!', remove it for lookup
+        # command name from event includes the prefix '!', remove it for lookup
         command_name = command.lstrip('!')
 
         cmd_obj: Command | None = self._command_manager.get_command(command_name)
 
         if cmd_obj:
-            # --- Admin Check ---
+            # --- admin check ---
             admin_user = self._config.get("admin_user")
             logged_name = user.get("name")
-            # Add detailed logging for comparison
-            logger.debug(f"Admin Check Comparison: Logged Name='{logged_name}' (Type: {type(logged_name)}, Len: {len(logged_name) if logged_name else 0}), Config Name='{admin_user}' (Type: {type(admin_user)}, Len: {len(admin_user) if admin_user else 0})")
-            # Strip whitespace from both names before comparing
+            # add detailed logging for comparison
+            logger.debug(f"admin check comparison: logged name='{logged_name}' (type: {type(logged_name)}, len: {len(logged_name) if logged_name else 0}), config name='{admin_user}' (type: {type(admin_user)}, len: {len(admin_user) if admin_user else 0})")
+            # strip whitespace from both names before comparing
             is_admin = admin_user and logged_name and logged_name.strip() == admin_user.strip()
-            logger.debug(f"Admin check result after strip: is_admin={is_admin}") # Log result after strip
+            logger.debug(f"admin check result after strip: is_admin={is_admin}") # log result after strip
 
 
             if cmd_obj.admin_only and not is_admin:
-                logger.warning(f"Non-admin user '{user.get('name')}' attempted to run admin command '!{command_name}'. Ignoring.")
-                # Optionally notify user they lack permission
-                return # Stop processing if not admin for admin-only command
+                logger.warning(f"non-admin user '{user.get('name')}' attempted to run admin command '!{command_name}'. ignoring.")
+                # optionally notify user they lack permission
+                return # stop processing if not admin for admin-only command
 
-            # --- Execute Command (if checks pass) ---
-            # Execute the command (Command object handles enabled checks internally)
+            # --- execute command (if checks pass) ---
+            # execute the command (command object handles enabled checks internally)
             try:
-                # Run in a separate thread to prevent blocking the event handler
+                # run in a separate thread to prevent blocking the event handler
                 cmd_thread = threading.Thread(target=cmd_obj.execute, args=(user, args), daemon=True)
                 cmd_thread.start()
-                # cmd_obj.execute(user, args) # Synchronous execution (can block)
+                # cmd_obj.execute(user, args) # synchronous execution (can block)
             except Exception as e:
-                logger.error(f"Unexpected error trying to start execution thread for command !{cmd_obj.name}: {e}", exc_info=True)
+                logger.error(f"unexpected error trying to start execution thread for command !{cmd_obj.name}: {e}", exc_info=True)
         else:
-            logger.warning(f"Command '{command_name}' requested by {user['name']} not found.")
-            # Optionally publish an "unknown_command" event or notify the user
+            logger.warning(f"command '{command_name}' requested by {user['name']} not found.")
+            # optionally publish an "unknown_command" event or notify the user
 
     def shutdown(self):
-        """Unsubscribes from events."""
-        logger.info("Executor shutting down...")
-        # Unsubscribe might be useful if dynamically reloading components
+        """unsubscribes from events."""
+        logger.info("executor shutting down...")
+        # unsubscribe might be useful if dynamically reloading components
         # self._event_bus.unsubscribe(EVENT_COMMAND_DETECTED, self.handle_command_event)
-        # logger.debug(f"Executor unsubscribed from '{EVENT_COMMAND_DETECTED}' event.")
+        # logger.debug(f"executor unsubscribed from '{EVENT_COMMAND_DETECTED}' event.")
 
 
-# Example usage (can be removed or kept for testing)
+# example usage (can be removed or kept for testing)
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
-    # Setup mock components
+    # setup mock components
     test_bus = EventBus()
     test_cmd_manager = CommandManager(test_bus)
 
     def mock_play(user, args):
-        print(f"--- MOCK PLAY --- User: {user['name']}, Args: {args}")
+        print(f"--- mock play --- user: {user['name']}, args: {args}")
         import time
-        time.sleep(2) # Simulate work
-        print(f"--- MOCK PLAY DONE ---")
+        time.sleep(2) # simulate work
+        print(f"--- mock play done ---")
 
     def mock_help(user, args):
-        print(f"--- MOCK HELP --- User: {user['name']}, Args: {args}")
+        print(f"--- mock help --- user: {user['name']}, args: {args}")
 
     test_cmd_manager.register_command("play", mock_play, aliases=["p"])
     test_cmd_manager.register_command("help", mock_help)
 
-    # Initialize Executor
+    # initialize executor
     executor = Executor(test_cmd_manager, test_bus)
 
-    print("\nPublishing command events...")
-    dummy_user1 = {"name": "Alice", "tags": None}
-    dummy_user2 = {"name": "Bob", "tags": "*DEAD*"}
+    print("\npublishing command events...")
+    dummy_user1 = {"name": "alice", "tags": None}
+    dummy_user2 = {"name": "bob", "tags": "*dead*"}
 
     test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!play", args=["song", "title"])
     test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user2, command="!help", args=[])
-    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!p", args=["another", "song"]) # Test alias
-    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user2, command="!unknown", args=["test"]) # Test unknown
+    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!p", args=["another", "song"]) # test alias
+    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user2, command="!unknown", args=["test"]) # test unknown
 
-    print("\nWaiting for commands to finish (due to threading)...")
-    # In a real app, the main loop would keep running. Here we just wait a bit.
+    print("\nwaiting for commands to finish (due to threading)...")
+    # in a real app, the main loop would keep running. here we just wait a bit.
     time.sleep(3)
 
-    print("\nExecutor test finished.")
-    # executor.shutdown() # Test shutdown if needed
+    print("\nexecutor test finished.")
+    # executor.shutdown() # test shutdown if needed
