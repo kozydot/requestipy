@@ -3,3 +3,5 @@ sounddevice
 soundfile
 yt-dlp
 pytest
+gTTS
+pydub

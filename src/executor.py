@@ -1,6 +1,7 @@
 import logging
 import threading
-from typing import Dict, List, Any
+import time # Import time
+from typing import Dict, List, Any, Optional, Tuple
 
 # assuming eventbus and commandmanager are accessible
 from src.event_bus import EventBus
@@ -9,6 +10,12 @@ from src.log_reader import EVENT_COMMAND_DETECTED # import event name
 
 logger = logging.getLogger(__name__)
 
+# Define a threshold for duplicate command detection (in seconds)
+DUPLICATE_COMMAND_THRESHOLD = 0.5
+
+# Define rate limit for non-admin users (in seconds)
+NON_ADMIN_RATE_LIMIT_SECONDS = 30.0
+
 class Executor:
     """listens for command events and executes them using commandmanager."""
 
@@ -16,6 +23,13 @@ class Executor:
         self._config = config # store config
         self._command_manager = command_manager
         self._event_bus = event_bus
+        # --- State for duplicate command detection ---
+        self._last_event_time: float = 0.0
+        self._last_event_details: Optional[Tuple[Optional[str], str, Tuple[str, ...]]] = None
+        self._event_lock = threading.Lock() # Lock for accessing last event state
+        # --------------------------------------------
+        # --- State for rate limiting ---
+        self._user_last_command_time: Dict[str, float] = {} # Key: username, Value: timestamp
         self._subscribe_to_events()
         logger.info("Executor initialized and subscribed to events.")
 
@@ -26,27 +40,63 @@ class Executor:
 
     def handle_command_event(self, user: Dict[str, Any], command: str, args: List[str]):
         """handles the command detected event."""
-        # log the raw user dict received
-        logger.debug(f"executor received command event: raw user dict={user}, command={command}, args={args}")
+        current_time = time.time()
+        command_name = command.lstrip('!') # command name without prefix
+        user_name = user.get('name') # Get user name safely
+        args_tuple = tuple(args) # Convert args list to tuple for comparison
 
-        # command name from event includes the prefix '!', remove it for lookup
-        command_name = command.lstrip('!')
+        # Create details tuple for the current event
+        current_details = (user_name, command_name, args_tuple)
+
+        # --- Duplicate Check ---
+        with self._event_lock: # Protect access to shared state
+            time_diff = current_time - self._last_event_time
+            is_duplicate = (current_details == self._last_event_details and
+                            time_diff < DUPLICATE_COMMAND_THRESHOLD)
+
+            if is_duplicate:
+                logger.warning(f"Duplicate command detected within {time_diff:.2f}s. Ignoring: User='{user_name}', Command='!{command_name}', Args={args}")
+                return # Ignore the likely duplicate event
+
+            # Update last event details if not a duplicate
+            self._last_event_time = current_time
+            self._last_event_details = current_details
+        # --- End Duplicate Check ---
+
+        # --- Rate Limiting Check (Non-Admins) ---
+        admin_user = self._config.get("admin_user")
+        is_admin = admin_user and user_name and user_name.strip() == admin_user.strip()
+
+        if not is_admin:
+            # Use username for rate limiting if user_name is valid
+            if user_name:
+                last_time = self._user_last_command_time.get(user_name)
+                if last_time:
+                    elapsed = current_time - last_time
+                    if elapsed < NON_ADMIN_RATE_LIMIT_SECONDS:
+                        logger.warning(f"Rate limit exceeded for user '{user_name}'. Command '!{command_name}' ignored. Time left: {NON_ADMIN_RATE_LIMIT_SECONDS - elapsed:.1f}s")
+                        return # Ignore command due to rate limit
+
+                # If rate limit passed or first command for this user, update timestamp
+                logger.debug(f"Updating last command time for non-admin user '{user_name}'")
+                self._user_last_command_time[user_name] = current_time
+            else:
+                logger.warning(f"Cannot apply rate limit: Username not found in user data: {user}. Allowing command.")
+        # --- End Rate Limiting Check ---
+
+
+        # log the raw user dict received (after duplicate check)
+        logger.debug(f"Executor processing command event: User Dict={user}, Command={command}, Args={args}")
 
         cmd_obj: Command | None = self._command_manager.get_command(command_name)
 
         if cmd_obj:
             # --- admin check ---
-            admin_user = self._config.get("admin_user")
-            logged_name = user.get("name")
-            # add detailed logging for comparison
-            logger.debug(f"admin check comparison: logged name='{logged_name}' (type: {type(logged_name)}, len: {len(logged_name) if logged_name else 0}), config name='{admin_user}' (type: {type(admin_user)}, len: {len(admin_user) if admin_user else 0})")
-            # strip whitespace from both names before comparing
-            is_admin = admin_user and logged_name and logged_name.strip() == admin_user.strip()
-            logger.debug(f"admin check result after strip: is_admin={is_admin}") # log result after strip
-
+            # is_admin check already performed above for rate limiting
+            logger.debug(f"Admin check for command execution: is_admin={is_admin}")
 
             if cmd_obj.admin_only and not is_admin:
-                logger.warning(f"non-admin user '{user.get('name')}' attempted to run admin command '!{command_name}'. ignoring.")
+                logger.warning(f"Non-admin user '{user_name}' attempted to run admin command '!{command_name}'. Ignoring.")
                 # optionally notify user they lack permission
                 return # stop processing if not admin for admin-only command
 
@@ -60,7 +110,7 @@ class Executor:
             except Exception as e:
                 logger.error(f"unexpected error trying to start execution thread for command !{cmd_obj.name}: {e}", exc_info=True)
         else:
-            logger.warning(f"command '{command_name}' requested by {user['name']} not found.")
+            logger.warning(f"command '{command_name}' requested by {user_name} not found.")
             # optionally publish an "unknown_command" event or notify the user
 
     def shutdown(self):
@@ -77,35 +127,56 @@ if __name__ == '__main__':
 
     # setup mock components
     test_bus = EventBus()
+    # Use a real config dict for testing admin check
+    test_config = {"admin_user": "alice"}
     test_cmd_manager = CommandManager(test_bus)
 
     def mock_play(user, args):
-        print(f"--- mock play --- user: {user['name']}, args: {args}")
+        print(f"--- MOCK PLAY --- User: {user['name']}, Args: {args}")
         import time
-        time.sleep(2) # simulate work
-        print(f"--- mock play done ---")
+        time.sleep(0.2) # Simulate work
+        print(f"--- MOCK PLAY DONE ---")
 
     def mock_help(user, args):
-        print(f"--- mock help --- user: {user['name']}, args: {args}")
+        print(f"--- MOCK HELP --- User: {user['name']}, Args: {args}")
 
-    test_cmd_manager.register_command("play", mock_play, aliases=["p"])
+    test_cmd_manager.register_command("play", mock_play, aliases=["p"], admin_only=True) # Make play admin only
     test_cmd_manager.register_command("help", mock_help)
 
-    # initialize executor
-    executor = Executor(test_cmd_manager, test_bus)
+    # Initialize Executor with config
+    executor = Executor(test_config, test_cmd_manager, test_bus)
 
-    print("\npublishing command events...")
-    dummy_user1 = {"name": "alice", "tags": None}
-    dummy_user2 = {"name": "bob", "tags": "*dead*"}
+    print("\nPublishing command events...")
+    dummy_user1 = {"name": "alice", "tags": None} # Admin
+    dummy_user2 = {"name": "bob", "tags": "*DEAD*"} # Not Admin
 
+    # Test admin command by admin
     test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!play", args=["song", "title"])
+    time.sleep(0.1) # Short delay
+
+    # Test admin command by non-admin (should be ignored)
+    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user2, command="!play", args=["another", "song"])
+    time.sleep(0.1)
+
+    # Test non-admin command
     test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user2, command="!help", args=[])
-    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!p", args=["another", "song"]) # test alias
-    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user2, command="!unknown", args=["test"]) # test unknown
+    time.sleep(0.1)
 
-    print("\nwaiting for commands to finish (due to threading)...")
-    # in a real app, the main loop would keep running. here we just wait a bit.
-    time.sleep(3)
+    # Test duplicate command quickly (should be ignored)
+    print("\nTesting duplicate command...")
+    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!help", args=["test"])
+    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!help", args=["test"]) # Duplicate
+    time.sleep(0.1)
 
-    print("\nexecutor test finished.")
-    # executor.shutdown() # test shutdown if needed
+    # Test same command after threshold (should execute)
+    print("\nTesting same command after threshold...")
+    time.sleep(DUPLICATE_COMMAND_THRESHOLD + 0.1)
+    test_bus.publish(EVENT_COMMAND_DETECTED, user=dummy_user1, command="!help", args=["test"])
+
+
+    print("\nWaiting for commands to finish (due to threading)...")
+    # In a real app, the main loop would keep running. Here we just wait a bit.
+    time.sleep(1)
+
+    print("\nExecutor test finished.")
+    # executor.shutdown() # Test shutdown if needed

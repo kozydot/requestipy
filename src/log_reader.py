@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-import time
+import time # Make sure time is imported
 import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -15,8 +15,10 @@ from src.event_bus import EventBus
 logger = logging.getLogger(__name__)
 
 # regex patterns
-# fifth attempt at chat_regex: match optional tag+space non-capturing, capture user after
-CHAT_REGEX = re.compile(r"^(?:\*?(?:DEAD|TEAM|SPEC)\*? )?(?P<user>.+?) : (?P<message>.+)$")
+# Updated chat regex to capture SteamID
+# Example: *DEAD* Player Name<U:1:12345><Blue> : !command args
+CHAT_REGEX_FULL = re.compile(r"^(?:\*?(?:DEAD|TEAM|SPEC)\*? )?(?P<user>.+?)<(?P<steamid>U:\d+:\d+)>(?:<(?P<team>Red|Blue|Spectator|Console)>)? : (?P<message>.+)$") # Made team tag optional
+CHAT_REGEX_SIMPLE = re.compile(r"^(?P<user>[^:]+?) : (?P<message>.+)$") # Simple format: User : Message
 # user killed otheruser with weapon. (crit)
 KILL_REGEX = re.compile(r"^(?P<killer>.+?) killed (?P<victim>.+?) with (?P<weapon>.+?)\.(?: \(crit\))?$")
 # user connected
@@ -80,6 +82,9 @@ class LogFileEventHandler(FileSystemEventHandler):
                     # log the raw content read before splitting lines
                     logger.debug(f"raw content read:\n---\n{new_content}\n---")
                     lines = new_content.splitlines()
+                    # --- Add small delay to potentially coalesce rapid events ---
+                    time.sleep(0.1)
+                    # -----------------------------------------------------------
                     for i, line in enumerate(lines):
                          if line: # avoid processing empty lines
                             logger.debug(f"processing line {i+1}/{len(lines)}: '{line}'") # log each line being processed
@@ -174,62 +179,69 @@ class LogReader:
         # proceed with processing every line read
         logger.debug(f"processing line: {line}")
 
-        # 1. check for chat/commands
-        chat_match = CHAT_REGEX.match(line)
-        if chat_match:
-            # extract user and message directly
-            user = (chat_match.group('user') or "").strip()
-            message = (chat_match.group('message') or "").strip()
+        # --- Try matching different chat formats ---
+        user_info = None
+        message = None
 
-            # determine tag separately by checking start of original line
-            tags = None
-            user_name = user # start with the potentially tagged name from regex group
+        # 1a. Try matching the full format (with SteamID)
+        match_full = CHAT_REGEX_FULL.match(line)
+        if match_full:
+            user = (match_full.group('user') or "").strip()
+            message = (match_full.group('message') or "").strip()
+            steamid = match_full.group('steamid')
+            team = match_full.group('team') # Might be None if optional part didn't match
+
+            # Determine tags based on line start (as before)
+            tags = None # Reset tags for this match attempt
+            user_name = user # Start with potentially tagged name
             tag_prefix = None
-            # add more variations if needed (e.g., no asterisk, different brackets)
             if line.startswith("*DEAD* "): tag_prefix = "*DEAD* "
             elif line.startswith("*TEAM* "): tag_prefix = "*TEAM* "
-            elif line.startswith("[TEAM] "): tag_prefix = "[TEAM] " # handle brackets
+            elif line.startswith("[TEAM] "): tag_prefix = "[TEAM] "
             elif line.startswith("*SPEC* "): tag_prefix = "*SPEC* "
-            elif line.startswith("[SPEC] "): tag_prefix = "[SPEC] " # handle brackets
-            elif line.startswith("[DEAD] "): tag_prefix = "[DEAD] " # handle brackets
+            elif line.startswith("[SPEC] "): tag_prefix = "[SPEC] "
+            elif line.startswith("[DEAD] "): tag_prefix = "[DEAD] "
 
             if tag_prefix:
-                tags = tag_prefix.strip() # store the tag without trailing space
-                # remove the prefix from the start of the user name
+                tags = tag_prefix.strip()
                 if user_name.startswith(tag_prefix):
-                     user_name = user_name[len(tag_prefix):].strip()
+                    user_name = user_name[len(tag_prefix):].strip()
                 else:
-                     # fallback if space wasn't captured correctly (shouldn't happen often)
-                     logger.warning(f"tag prefix '{tag_prefix}' detected but not found at start of user '{user}'. stripping tag only.")
-                     # use the detected tag (without space) for removal attempt
-                     user_name = user_name.replace(tags, "").strip()
+                    logger.warning(f"Tag prefix '{tag_prefix}' detected but not found at start of user '{user}'. Stripping tag only.")
+                    user_name = user_name.replace(tags, "").strip()
 
-            if not user_name: # safety check after potential removal
-                 logger.warning(f"could not extract final user name from chat line: {line}")
-                 return
+            if not user_name:
+                logger.warning(f"Could not extract final user name from full chat line: {line}")
+            else:
+                user_info = {"name": user_name, "steamid": steamid, "tags": tags, "team": team}
 
-            # check if it's a command (using the stripped message)
+        # 1b. If full format didn't match, try simple format
+        elif not user_info:
+            match_simple = CHAT_REGEX_SIMPLE.match(line)
+            if match_simple:
+                user_name = (match_simple.group('user') or "").strip()
+                message = (match_simple.group('message') or "").strip()
+                if user_name: # Ensure user name is not empty
+                    user_info = {"name": user_name, "steamid": None, "tags": None, "team": None}
+
+        # --- Process if a chat format matched ---
+        if user_info and message is not None:
             if message.startswith("!") and len(message) > 1:
+                # Command detected
                 parts = message.split(maxsplit=1)
                 command = parts[0]
                 args_str = parts[1].strip() if len(parts) > 1 else "" # strip args string too
                 args_list = args_str.split() # simple space splitting for now
-
-                # use the cleaned user_name
-                user_info = {"name": user_name, "tags": tags}
-
-                logger.info(f"command detected: user={user_name}, command={command}, args={args_list}") # log cleaned name
+                logger.info(f"Command detected: user={user_info['name']}, command={command}, args={args_list}")
                 logger.debug(f"publishing event_command_detected with user_info: {user_info}")
                 self._event_bus.publish(EVENT_COMMAND_DETECTED, user=user_info, command=command, args=args_list)
             else:
-                # regular chat message
-                 # use the cleaned user_name here too
-                 user_info = {"name": user_name, "tags": tags}
-                 logger.info(f"chat received: user={user_name}, message='{message}'") # log cleaned name
+                # Regular chat message
+                 logger.info(f"Chat received: user={user_info['name']}, message='{message}'")
                  self._event_bus.publish(EVENT_CHAT_RECEIVED, user=user_info, message=message)
             return # line processed
 
-        # 2. check for kills (add other regex checks similarly)
+        # --- If no chat format matched, check other patterns ---
         kill_match = KILL_REGEX.match(line)
         if kill_match:
             kill_data = kill_match.groupdict()

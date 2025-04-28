@@ -2,8 +2,14 @@ import logging
 import threading
 import os
 import tempfile
+import uuid # Import uuid for unique filenames
+import time # Import time for sleep
 import yt_dlp # requires yt-dlp package
+from gtts import gTTS, gTTSError # Import gTTS
+from pydub import AudioSegment # Import pydub
 from typing import List, Dict, Any
+import sounddevice as sd # Import sounddevice for direct playback
+import soundfile as sf   # Import soundfile for reading WAV data
 
 # assuming commandmanager and audioplayer are accessible via imports or passed in
 from src.command_manager import CommandManager
@@ -17,7 +23,7 @@ logger = logging.getLogger(__name__)
 # this is simpler than using events for direct command->action flow
 _audio_player_instance: AudioPlayer | None = None
 
-# temporary directory for downloads
+# temporary directory for downloads and tts files
 TEMP_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "requestify_py_downloads")
 os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
 
@@ -26,17 +32,6 @@ def _download_audio(url_or_search: str) -> str | None:
     logger.info(f"attempting to download/extract audio for: {url_or_search}")
 
     # configure yt-dlp options
-    # -f bestaudio: select the best quality audio-only format
-    # -x: extract audio
-    # --audio-format mp3/wav/opus: specify desired audio format (wav/opus often better for direct playback)
-    # --output: specify download path template
-    # --no-playlist: download only single video if url is part of playlist
-    # --default-search "ytsearch": use youtube search if not a url
-    # --audio-quality 0: best audio quality for extraction
-    # --quiet: suppress console output
-    # --no-warnings: suppress warnings
-    # --no-check-certificate: sometimes needed for network issues
-    # --geo-bypass: attempt to bypass geo-restrictions
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(TEMP_DOWNLOAD_DIR, '%(id)s.%(ext)s'), # save as id.ext
@@ -55,67 +50,65 @@ def _download_audio(url_or_search: str) -> str | None:
     }
 
     downloaded_file_path = None
+    final_file_path = None # Path to return
     info_dict = None # initialize info_dict to prevent unboundlocalerror
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # execute the download/extraction
             info_dict = ydl.extract_info(url_or_search, download=True) # this might raise downloaderror
 
-            # --- this part only runs if extract_info succeeds ---
-            # check if download actually happened and get the path
-            # yt-dlp might put the final path in 'requested_downloads' after postprocessing
+            # --- Determine the final path ---
             if 'requested_downloads' in info_dict and info_dict['requested_downloads']:
                  downloaded_file_path = info_dict['requested_downloads'][0]['filepath']
-                 logger.info(f"yt-dlp finished. extracted audio path: {downloaded_file_path}")
-            elif 'filepath' in info_dict: # fallback if not in requested_downloads
+                 logger.info(f"yt-dlp finished. Extracted audio path: {downloaded_file_path}")
+            elif 'filepath' in info_dict: # Fallback
                  downloaded_file_path = info_dict['filepath']
-                 logger.warning(f"yt-dlp finished, using 'filepath': {downloaded_file_path}. check if correct format.")
+                 logger.warning(f"yt-dlp finished, using 'filepath': {downloaded_file_path}. Check if correct format.")
             else:
-                 # sometimes the path is the 'filename' key if download=false, but we need download=true for postprocessing
-                 # if still not found, log an error
-                 logger.error(f"could not determine downloaded file path from yt-dlp info for: {url_or_search}")
-                 logger.debug(f"yt-dlp info_dict: {info_dict}") # log for debugging
+                 logger.error(f"Could not determine downloaded file path from yt-dlp info for: {url_or_search}")
+                 logger.debug(f"yt-dlp info_dict: {info_dict}")
                  return None
 
-            # ensure the expected file (e.g., .wav) exists after postprocessing
+            # Check for expected WAV file after postprocessing
             expected_path = os.path.splitext(downloaded_file_path)[0] + '.wav'
             if os.path.exists(expected_path):
-                 logger.info(f"confirmed extracted wav file exists: {expected_path}")
-                 return expected_path
+                 logger.info(f"Confirmed extracted WAV file exists: {expected_path}")
+                 final_file_path = expected_path
             elif os.path.exists(downloaded_file_path):
-                 # if the original extension file exists but not the wav, postprocessing might have failed
-                 logger.warning(f"postprocessing to wav might have failed. using original downloaded file: {downloaded_file_path}")
-                 return downloaded_file_path # return original if wav not found
+                 logger.warning(f"Postprocessing to WAV might have failed. Using original downloaded file: {downloaded_file_path}")
+                 final_file_path = downloaded_file_path # Return original if WAV not found
             else:
-                 logger.error(f"neither expected wav nor original download path found after yt-dlp: {expected_path} / {downloaded_file_path}")
+                 logger.error(f"Neither expected WAV nor original download path found after yt-dlp: {expected_path} / {downloaded_file_path}")
                  return None
 
-    # catch specific permissionerror which might occur if files are locked (e.g., by antivirus or race condition)
+        # --- Add delay after ydl context manager exits ---
+        # Give ffmpeg/postprocessor time to release file locks
+        time.sleep(0.5)
+        logger.debug("Short delay added after yt-dlp processing.")
+        # -------------------------------------------------
+
+        return final_file_path # Return the determined path
+
     except PermissionError as e:
         logger.error(f"permissionerror during yt-dlp postprocessing for '{url_or_search}': {e}", exc_info=True)
-        # attempt to return the original downloaded path if it exists, as conversion failed
-        if 'filepath' in info_dict and os.path.exists(info_dict['filepath']):
+        # --- Fix TypeError: Check if info_dict exists before accessing ---
+        if info_dict and 'filepath' in info_dict and os.path.exists(info_dict['filepath']):
              logger.warning(f"returning original download path due to permissionerror: {info_dict['filepath']}")
              return info_dict.get('filepath') # use .get() for safety
+        # -----------------------------------------------------------------
         return None
     except yt_dlp.utils.DownloadError as e:
-        # handle potential ffprobe errors *within* the except block
         err_str = str(e)
         if "warning: unable to obtain file audio codec with ffprobe" in err_str:
-             # log the warning, but don't try to access info_dict as it might not exist
              logger.warning(f"yt-dlp downloaderror contained ffprobe warning for '{url_or_search}': {err_str}")
-             # cannot reliably determine output path here, so return none
              return None
         elif "unable to rename file" in err_str:
              logger.error(f"yt-dlp file rename error for '{url_or_search}': {err_str}")
-             # file might be locked, return none
              return None
         else:
-             # log other download errors
              logger.error(f"yt-dlp downloaderror for '{url_or_search}': {err_str}")
              return None
     except Exception as e:
-        # catch any other unexpected errors during download/extraction
         logger.error(f"unexpected error during yt-dlp processing for '{url_or_search}': {e}", exc_info=True)
         return None
 
@@ -140,7 +133,11 @@ def cmd_play(user: Dict[str, Any], args: List[str]):
     def download_and_play():
         file_path = _download_audio(query)
         if file_path:
+            # --- Add another small delay before queueing ---
+            time.sleep(0.2)
+            # ---------------------------------------------
             if os.path.exists(file_path):
+                logger.info(f"Queueing downloaded file: {file_path}")
                 _audio_player_instance.play_file(file_path)
                 # todo: optionally add cleanup for downloaded files later
             else:
@@ -201,6 +198,102 @@ def cmd_skip(user: Dict[str, Any], args: List[str]):
     # stop current playback *without* clearing the queue
     _audio_player_instance.stop_playback(clear_queue=False)
 
+# --- !tts command logic ---
+
+def cmd_tts(user: Dict[str, Any], args: List[str]):
+    """handles the !tts command."""
+    global _audio_player_instance
+    if not _audio_player_instance:
+        logger.error("audioplayer instance not available for !tts command.")
+        # todo: notify user?
+        return
+
+    if not args:
+        logger.warning(f"user {user['name']} used !tts without text.")
+        # todo: send help message to user?
+        return
+
+    text_to_speak = " ".join(args)
+    logger.info(f"user {user['name']} requested tts: '{text_to_speak}'")
+
+    # run tts generation and conversion in a separate thread
+    def generate_convert_and_play():
+        mp3_file_path = None # Initialize path variable
+        wav_file_path = None # Initialize path variable
+        try:
+            logger.debug(f"generating tts for: '{text_to_speak}'")
+            tts = gTTS(text=text_to_speak, lang='en') # using english language
+            # generate unique filename for mp3
+            mp3_filename = f"tts_{uuid.uuid4()}.mp3"
+            mp3_file_path = os.path.join(TEMP_DOWNLOAD_DIR, mp3_filename)
+
+            logger.debug(f"saving tts audio to mp3: {mp3_file_path}")
+            tts.save(mp3_file_path)
+
+            if os.path.exists(mp3_file_path):
+                logger.info(f"tts mp3 audio saved successfully: {mp3_file_path}")
+
+                # Convert MP3 to WAV using pydub
+                try:
+                    logger.debug(f"converting {mp3_file_path} to wav...")
+                    sound = AudioSegment.from_mp3(mp3_file_path)
+                    wav_filename = os.path.splitext(mp3_filename)[0] + ".wav"
+                    wav_file_path = os.path.join(TEMP_DOWNLOAD_DIR, wav_filename)
+                    sound.export(wav_file_path, format="wav")
+                    logger.info(f"converted tts audio to wav: {wav_file_path}")
+
+                    # Queue the WAV file for playback
+                    # --- Modification: Play directly instead of queueing ---
+                    if os.path.exists(wav_file_path):
+                        try:
+                            logger.debug(f"Attempting direct playback of TTS WAV: {wav_file_path}")
+                            data, samplerate = sf.read(wav_file_path, dtype='float32')
+                            sd.play(data, samplerate, blocking=True) # Play and wait
+                            logger.info(f"Finished direct playback of TTS: {wav_file_path}")
+                            # --- Add WAV cleanup after successful playback ---
+                            try:
+                                os.remove(wav_file_path)
+                                logger.debug(f"Cleaned up temporary TTS WAV file: {wav_file_path}")
+                            except Exception as del_wav_e:
+                                logger.error(f"Error deleting temporary TTS WAV file {wav_file_path}: {del_wav_e}")
+                        except Exception as play_e:
+                            logger.error(f"Error during direct sounddevice playback of {wav_file_path}: {play_e}", exc_info=True)
+                    else:
+                        logger.error(f"wav file path reported but not found after conversion: {wav_file_path}")
+
+                except Exception as convert_e:
+                    logger.error(f"error converting mp3 to wav for '{mp3_file_path}': {convert_e}", exc_info=True)
+                    # todo: notify user of conversion failure?
+                finally:
+                    # Clean up the intermediate MP3 file regardless of conversion success
+                    if os.path.exists(mp3_file_path):
+                        try:
+                            os.remove(mp3_file_path)
+                            logger.debug(f"cleaned up temporary mp3 file: {mp3_file_path}")
+                        except Exception as del_e:
+                            logger.error(f"error deleting temporary mp3 file {mp3_file_path}: {del_e}")
+
+            else:
+                 logger.error(f"tts mp3 file path reported but not found after saving: {mp3_file_path}")
+
+        except gTTSError as e:
+             logger.error(f"gtts error generating speech for '{text_to_speak}': {e}", exc_info=True)
+             # todo: notify user of failure?
+        except Exception as e:
+             logger.error(f"unexpected error during tts processing for '{text_to_speak}': {e}", exc_info=True)
+             # todo: notify user of failure?
+             # Clean up potentially created files if error occurred before cleanup block
+             if mp3_file_path and os.path.exists(mp3_file_path):
+                 try: os.remove(mp3_file_path)
+                 except Exception: pass
+             if wav_file_path and os.path.exists(wav_file_path):
+                 try: os.remove(wav_file_path)
+                 except Exception: pass
+
+
+    tts_thread = threading.Thread(target=generate_convert_and_play, daemon=True)
+    tts_thread.start()
+
 
 # --- registration ---
 
@@ -214,7 +307,7 @@ def register(command_manager: CommandManager, audio_player: AudioPlayer):
         func=cmd_play,
         aliases=["p"],
         help_text="plays audio from a youtube url or search query. usage: !play <url_or_search_terms>",
-        admin_only=True, # mark as admin only
+        admin_only=False, # Allow all users
         source="core"
     )
     command_manager.register_command(
@@ -241,6 +334,14 @@ def register(command_manager: CommandManager, audio_player: AudioPlayer):
         admin_only=True, # usually admin only
         source="core"
     )
+    command_manager.register_command(
+        name="tts",
+        func=cmd_tts,
+        aliases=[], # no aliases for now
+        help_text="converts text to speech and plays it. usage: !tts <text to speak>",
+        admin_only=False, # Allow all users
+        source="core"
+    )
     # register other core commands here if needed
     logger.info("core commands registered.")
 
@@ -250,12 +351,14 @@ def unregister(command_manager: CommandManager):
      command_manager.unregister_command("play")
      command_manager.unregister_command("stop")
      command_manager.unregister_command("queue")
-     command_manager.unregister_command("skip") # add skip here too
+     command_manager.unregister_command("skip")
+     command_manager.unregister_command("tts") # unregister tts too
      logger.info("core commands unregistered.")
 
 
 # example usage (can be removed or kept for testing)
 if __name__ == '__main__':
+    # Requires ffmpeg/ffprobe to be installed and in PATH for pydub conversion
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
     # mock components for testing
@@ -265,6 +368,10 @@ if __name__ == '__main__':
             # simulate check if file exists
             if os.path.exists(file_path):
                  print(f"--- mock audio player: playing {file_path} ---")
+                 # Clean up the dummy tts file in test
+                 if "tts_" in os.path.basename(file_path) and file_path.endswith(".wav"):
+                     try: os.remove(file_path)
+                     except Exception: pass
             else:
                  print(f"--- mock audio player: file not found {file_path} ---")
 
@@ -290,5 +397,17 @@ if __name__ == '__main__':
 
     else:
         print("!play command not registered.")
+
+    print("\n--- testing !tts command ---")
+    tts_cmd = mock_cmd_manager.get_command("tts")
+    if tts_cmd:
+        print("simulating command execution for '!tts hello this is a test'")
+        # Test the command function itself (which starts a thread)
+        tts_cmd.execute({"name": "testuser"}, ["hello", "this", "is", "a", "test"])
+        import time
+        time.sleep(5) # wait for tts thread in test (adjust time as needed)
+    else:
+        print("!tts command not registered.")
+
 
     print("\ncore commands test finished.")

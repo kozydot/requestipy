@@ -107,19 +107,20 @@ class AudioPlayer:
 
             logger.info(f"attempting to start playback for: {file_path}") # changed log message slightly
             # --- load audio data ---
-            try:
-                data, samplerate = sf.read(file_path, dtype='float32')
-                logger.debug(f"loaded audio file: {file_path}, samplerate: {samplerate}, shape: {data.shape}")
-            except sf.SoundFileError as e:
-                logger.error(f"soundfileerror loading {file_path}: {e}")
-                if self._event_bus: self._event_bus.publish(EVENT_PLAYBACK_ERROR, file_path=file_path, error=str(e))
-                self._play_queue.task_done() # mark as done even on load failure
-                continue # skip to next item in queue
-            except Exception as e:
-                logger.error(f"unexpected error loading audio file {file_path}: {e}", exc_info=True)
-                if self._event_bus: self._event_bus.publish(EVENT_PLAYBACK_ERROR, file_path=file_path, error=str(e))
-                self._play_queue.task_done()
-                continue
+            # We actually don't need to preload data if using the callback with sf.SoundFile
+            # try:
+            #     data, samplerate = sf.read(file_path, dtype='float32')
+            #     logger.debug(f"loaded audio file: {file_path}, samplerate: {samplerate}, shape: {data.shape}")
+            # except sf.SoundFileError as e:
+            #     logger.error(f"soundfileerror loading {file_path}: {e}")
+            #     if self._event_bus: self._event_bus.publish(EVENT_PLAYBACK_ERROR, file_path=file_path, error=str(e))
+            #     self._play_queue.task_done() # mark as done even on load failure
+            #     continue # skip to next item in queue
+            # except Exception as e:
+            #     logger.error(f"unexpected error loading audio file {file_path}: {e}", exc_info=True)
+            #     if self._event_bus: self._event_bus.publish(EVENT_PLAYBACK_ERROR, file_path=file_path, error=str(e))
+            #     self._play_queue.task_done()
+            #     continue
 
             # --- play audio using outputstream and callback ---
             stream = None # define stream variable outside try
@@ -135,30 +136,38 @@ class AudioPlayer:
                     # buffer size (frames per callback)
                     blocksize = 1024 # adjust as needed
 
-                    def callback(outdata: memoryview, frames: int, time, status: sd.CallbackFlags):
+                    def callback(outdata: memoryview, frames: int, time_info, status: sd.CallbackFlags):
                         """callback function to feed audio data to the stream."""
                         if status:
                             logger.warning(f"playback status flags: {status}")
-                            # signal error if needed, like based on status.output_underflow etc.
-                            # stream_finished_event.set() # signal completion on error?
-                            # raise sd.CallbackAbort() # abort stream on error?
+                            # You might want to signal an error or stop based on the status
+                            # For example: if status.output_underflow: stream_finished_event.set()
 
-                        # read requested number of frames from the file
-                        read_data = audio_file.read(frames, dtype='float32', always_2d=True)
+                        try:
+                            # read requested number of frames from the file
+                            read_data = audio_file.read(frames, dtype='float32', always_2d=True)
+                            frames_read = read_data.shape[0]
 
-                        if read_data.shape[0] == 0: # end of file
-                            logger.debug("callback: end of file reached.")
-                            outdata[:] = 0 # fill buffer with silence
-                            raise sd.CallbackStop # signal stream to stop
+                            if frames_read == 0: # end of file reached immediately
+                                logger.debug("callback: end of file reached (0 frames read).")
+                                outdata[:] = 0 # fill buffer with silence
+                                raise sd.CallbackStop # signal stream to stop
+                            else:
+                                # copy the read data into the output buffer slice
+                                outdata[:frames_read] = read_data
 
-                        # copy read data to output buffer
-                        outdata[:] = read_data
+                                if frames_read < frames: # end of file reached in this read
+                                    logger.debug(f"callback: padding end of stream ({frames_read}/{frames} frames).")
+                                    # zero out the remaining part of the buffer
+                                    outdata[frames_read:] = 0
+                                    raise sd.CallbackStop # signal stream to stop after this buffer
 
-                        # if less data was read than asked for (end of file padding)
-                        if read_data.shape[0] < frames:
-                            logger.debug(f"callback: padding end of stream ({read_data.shape[0]}/{frames} frames).")
-                            outdata[read_data.shape[0]:] = 0 # zero out the rest of the buffer
-                            raise sd.CallbackStop # signal stream to stop after this buffer
+                        except Exception as e:
+                            logger.error(f"error within audio callback for {file_path}: {e}", exc_info=True)
+                            # Signal completion/error to the main thread
+                            stream_finished_event.set()
+                            raise sd.CallbackAbort # Abort stream on unexpected error in callback
+
 
                     def finished_callback():
                         """called when the stream finishes normally or is stopped/aborted."""
@@ -171,7 +180,7 @@ class AudioPlayer:
                         device=self._target_device_id, # use the found device id (or none for default)
                         samplerate=samplerate,
                         channels=channels,
-                        blocksize=blocksize, # let callback handle buffer size
+                        blocksize=blocksize, # use specified blocksize
                         callback=callback,
                         finished_callback=finished_callback
                     )
@@ -205,8 +214,12 @@ class AudioPlayer:
                     # make sure stream is stopped and closed if it exists
                     with self._lock:
                         if self._current_stream == stream and stream: # check if it's still the same stream
-                            if not stream.stopped: stream.stop()
-                            if not stream.closed: stream.close()
+                            if not stream.stopped:
+                                try: stream.stop()
+                                except sd.PortAudioError as pae: logger.warning(f"Ignoring PortAudioError on stop: {pae}")
+                            if not stream.closed:
+                                try: stream.close()
+                                except sd.PortAudioError as pae: logger.warning(f"Ignoring PortAudioError on close: {pae}")
                             self._current_stream = None # clear reference
                             logger.debug(f"stream stopped and closed for {file_path}")
 
@@ -225,18 +238,28 @@ class AudioPlayer:
                  logger.error(f"soundfileerror opening/reading {file_path}: {e}")
                  if self._event_bus: self._event_bus.publish(EVENT_PLAYBACK_ERROR, file_path=file_path, error=str(e))
             except sd.PortAudioError as e:
-                logger.error(f"portaudioerror during playback for {file_path}: {e}", exc_info=True) # added exc_info
+                logger.error(f"portaudioerror during playback setup for {file_path}: {e}", exc_info=True) # added exc_info
                 if self._event_bus: self._event_bus.publish(EVENT_PLAYBACK_ERROR, file_path=file_path, error=str(e))
             except Exception as e:
                 logger.error(f"unexpected error during playback processing of {file_path}: {e}", exc_info=True) # changed log message
                 if self._event_bus: self._event_bus.publish(EVENT_PLAYBACK_ERROR, file_path=file_path, error=str(e))
             finally:
+                # ensure stream is cleaned up even if errors occurred before the main wait loop
+                with self._lock:
+                    if self._current_stream == stream and stream and not stream.closed:
+                        try:
+                            if not stream.stopped: stream.stop()
+                            stream.close()
+                            self._current_stream = None
+                            logger.debug(f"stream cleaned up in finally block for {file_path}")
+                        except sd.PortAudioError as pae:
+                            logger.warning(f"Ignoring PortAudioError during finally cleanup: {pae}")
+                        except Exception as final_e:
+                             logger.error(f"Error during final stream cleanup for {file_path}: {final_e}")
+
                 # mark task as done regardless of success/failure
                 logger.debug(f"marking task done for {file_path} in finally block.")
                 self._play_queue.task_done()
-                # no _current_stream to clear when using sd.play
-                # with self._lock:
-                #    self._current_stream = None
 
 
         logger.warning("audio playback thread loop exited.") # changed level to warning
@@ -324,7 +347,12 @@ if __name__ == '__main__':
         dummy_file = None
 
 
-    player = AudioPlayer()
+    # Example config dictionary
+    test_config = {
+        "output_device_substring": "CABLE Input" # Replace with part of your desired output device name
+    }
+    player = AudioPlayer(config=test_config)
+
 
     if dummy_file:
         print("\nqueueing dummy file...")
