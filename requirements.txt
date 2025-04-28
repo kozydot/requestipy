@@ -1,0 +1,5 @@
+watchdog
+sounddevice
+soundfile
+yt-dlp
+pytest

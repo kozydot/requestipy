@@ -1,0 +1,9 @@
+{
+  "game_dir": "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/tf",
+  "log_file_name": "console.log",
+  "admin_user": "pill",
+  "ignored_users": [],
+  "ignored_reversed": false,
+  "log_level": "INFO",
+  "output_device_substring": "CABLE Input"
+}
