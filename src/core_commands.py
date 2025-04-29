@@ -57,19 +57,38 @@ def _download_audio(url_or_search: str) -> str | None:
             # execute the download/extraction
             info_dict = ydl.extract_info(url_or_search, download=True) # this might raise downloaderror
 
-            # --- Determine the final path ---
-            if 'requested_downloads' in info_dict and info_dict['requested_downloads']:
-                 downloaded_file_path = info_dict['requested_downloads'][0]['filepath']
+            # --- Determine the final path (Handles both direct URL and search results) ---
+            entry_info = info_dict # Default to top-level dict for direct URLs
+
+            # If 'entries' exists, it's likely a search result, use the first entry
+            if 'entries' in info_dict and info_dict['entries']:
+                logger.debug("Detected 'entries' key, likely a search result. Using first entry.")
+                entry_info = info_dict['entries'][0]
+            elif info_dict.get('_type') == 'playlist':
+                 logger.warning("yt-dlp returned a playlist type directly, but no 'entries'. This might be unexpected.")
+                 # Attempt to use top-level info anyway, might fail.
+
+            # Now extract path info from the determined dictionary (entry_info)
+            if 'requested_downloads' in entry_info and entry_info['requested_downloads']:
+                 downloaded_file_path = entry_info['requested_downloads'][0]['filepath']
                  logger.info(f"yt-dlp finished. Extracted audio path: {downloaded_file_path}")
-            elif 'filepath' in info_dict: # Fallback
-                 downloaded_file_path = info_dict['filepath']
-                 logger.warning(f"yt-dlp finished, using 'filepath': {downloaded_file_path}. Check if correct format.")
+            elif 'filepath' in entry_info: # Fallback if postprocessor didn't populate requested_downloads
+                 downloaded_file_path = entry_info['filepath']
+                 logger.warning(f"yt-dlp finished, using 'filepath' from entry_info: {downloaded_file_path}. Check if correct format.")
             else:
+                 # Log detailed info if path extraction fails
                  logger.error(f"Could not determine downloaded file path from yt-dlp info for: {url_or_search}")
-                 logger.debug(f"yt-dlp info_dict: {info_dict}")
+                 logger.debug(f"Top-level info_dict: {info_dict}")
+                 if entry_info is not info_dict: # Log entry_info only if it's different
+                     logger.debug(f"Used entry_info: {entry_info}")
                  return None
 
-            # Check for expected WAV file after postprocessing
+            # --- Check for expected WAV file after postprocessing ---
+            # Ensure downloaded_file_path is not None before proceeding
+            if downloaded_file_path is None:
+                 logger.error("Internal error: downloaded_file_path became None before WAV check.")
+                 return None
+
             expected_path = os.path.splitext(downloaded_file_path)[0] + '.wav'
             if os.path.exists(expected_path):
                  logger.info(f"Confirmed extracted WAV file exists: {expected_path}")
