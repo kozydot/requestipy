@@ -307,6 +307,10 @@ class AudioPlayer:
         with self._play_queue.mutex: # access underlying queue safely
             return list(self._play_queue.queue)
 
+    def get_output_device_id(self) -> Optional[int]:
+        """returns the configured output device id (or none if default)."""
+        return self._target_device_id
+
 
     def shutdown(self):
         """stops the playback thread and cleans up."""

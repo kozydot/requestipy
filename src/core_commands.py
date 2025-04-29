@@ -247,8 +247,13 @@ def cmd_tts(user: Dict[str, Any], args: List[str]):
                     if os.path.exists(wav_file_path):
                         try:
                             logger.debug(f"Attempting direct playback of TTS WAV: {wav_file_path}")
+                            # --- Get the configured output device ---
+                            device_id = _audio_player_instance.get_output_device_id()
+                            logger.debug(f"Using output device ID: {device_id} for TTS playback.")
+                            # ----------------------------------------
                             data, samplerate = sf.read(wav_file_path, dtype='float32')
-                            sd.play(data, samplerate, blocking=True) # Play and wait
+                            # --- Play on the configured device ---
+                            sd.play(data, samplerate, blocking=True, device=device_id) # Play and wait
                             logger.info(f"Finished direct playback of TTS: {wav_file_path}")
                             # --- Add WAV cleanup after successful playback ---
                             try:
