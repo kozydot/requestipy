@@ -374,7 +374,7 @@ if __name__ == '__main__':
         player.play_file(dummy_file)
 
         print("waiting for playback to finish naturally...")
-        # wait until the queue is processed
+        # wait until queue is processed
         player._play_queue.join()
         print("queue processed.")
 
