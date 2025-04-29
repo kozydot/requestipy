@@ -162,18 +162,7 @@ class LogReader:
     def _process_line(self, line: str):
         """parses a single line from the log and publishes events."""
         # --- duplicate check removed ---
-        # the duplicate check was preventing repeated identical commands.
-        # removing it to allow commands like !skip to be used consecutively.
-        # try:
-        #     line_hash = hashlib.sha1(line.encode('utf-8', errors='ignore')).hexdigest()
-        #     if line_hash in self._recent_lines_cache:
-        #         # logger.debug(f"skipping duplicate line: {line}") # can be noisy
-        #         return # skip processing this duplicate line
-        #     # add new hash to cache (deque automatically handles max size)
-        #     self._recent_lines_cache.append(line_hash)
-        # except exception as e:
-        #     # log error during hashing/cache check but proceed with processing anyway
-        #     logger.error(f"error during duplicate line check for '{line}': {e}", exc_info=true)
+        # ... (duplicate check code commented out as before) ...
         # --- end duplicate check ---
 
         # proceed with processing every line read
@@ -209,25 +198,49 @@ class LogReader:
         # --- If any chat format matched, clean username and create user_info ---
         if raw_user_name is not None and message is not None:
             # Apply tag stripping to raw_user_name
-            user_name = raw_user_name # Start with raw name
-            tags = None
+            user_name = raw_user_name # Start with raw name for stripping
+            stripped_tags = [] # Store potentially multiple tags
             possible_tags = ["*DEAD*", "*TEAM*", "[TEAM]", "*SPEC*", "[SPEC]", "[DEAD]"]
-            for tag in possible_tags:
-                if user_name.startswith(tag + " "):
-                    tags = tag
-                    user_name = user_name[len(tag)+1:].strip()
+            logger.debug(f"Starting tag stripping for raw name: '{user_name}'") # Debug log before loop
+
+            # --- Loop to strip multiple tags ---
+            while True:
+                tag_found_in_pass = False
+                current_name_before_pass = user_name # Store name before inner loop
+                for tag in possible_tags:
+                    # Check for tag with space
+                    if user_name.startswith(tag + " "):
+                        stripped_tags.append(tag)
+                        user_name = user_name[len(tag)+1:].strip()
+                        logger.debug(f"Stripped tag '{tag} ', remaining: '{user_name}'") # Debug log inside loop
+                        tag_found_in_pass = True
+                        break # Restart tag check from beginning with stripped name
+                    # Check for tag without space (less common but possible)
+                    elif user_name.startswith(tag):
+                         stripped_tags.append(tag)
+                         user_name = user_name[len(tag):].strip()
+                         logger.debug(f"Stripped tag '{tag}', remaining: '{user_name}'") # Debug log inside loop
+                         tag_found_in_pass = True
+                         break # Restart tag check from beginning with stripped name
+
+                # If no tag was found in this pass, exit the while loop
+                if not tag_found_in_pass:
                     break
-                elif user_name.startswith(tag):
-                    tags = tag
-                    user_name = user_name[len(tag):].strip()
+                # Safety break: If stripping didn't change the name, exit to prevent infinite loop
+                if user_name == current_name_before_pass:
+                    logger.warning(f"Tag stripping loop encountered potential infinite loop for '{raw_user_name}'. Breaking.")
                     break
+            # --- End loop ---
+            logger.debug(f"Finished tag stripping. Final name: '{user_name}', Tags: {stripped_tags}") # Debug log after loop
 
             if not user_name: # Safety check after stripping
                 logger.warning(f"Could not extract final user name after stripping tags from: {raw_user_name}")
                 return # Cannot proceed without a username
 
             # Create the final user_info dict
-            user_info = {"name": user_name, "steamid": steamid, "tags": tags, "team": team}
+            # Join tags if needed, or just use the list, or the last one found
+            final_tags = " ".join(stripped_tags) if stripped_tags else None
+            user_info = {"name": user_name, "steamid": steamid, "tags": final_tags, "team": team}
 
         # --- Process if a chat format matched ---
         if user_info and message is not None:
