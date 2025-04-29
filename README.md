@@ -61,6 +61,9 @@ For RequestiPy to read chat commands and for audio playback to work correctly wi
 *   `!skip` (Alias: `!next`): Skips the currently playing track in the queue. (Usable by: Admin Only)
 *   `!queue` (Alias: `!q`, `!list`): Shows the current playback queue in the RequestiPy console. (Usable by: Admin Only)
 
+## TO-DO
+*   Colored/Enhanced logging.
+
 ## Acknowledgements
 
 This project is a Python port/reimplementation inspired by the original C# RequestifyTF2 project by weespin. You can find the original project here: https://github.com/weespin/RequestifyTF2
