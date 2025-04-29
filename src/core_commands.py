@@ -236,10 +236,14 @@ def cmd_tts(user: Dict[str, Any], args: List[str]):
                 # Convert MP3 to WAV using pydub
                 try:
                     logger.debug(f"converting {mp3_file_path} to wav...")
-                    sound = AudioSegment.from_mp3(mp3_file_path)
+                    sound: AudioSegment = AudioSegment.from_mp3(mp3_file_path)
+                    # --- Boost TTS Volume ---
+                    boost_db = 6.0 # Boost by 6 dB (adjust as needed)
+                    boosted_sound = sound + boost_db
                     wav_filename = os.path.splitext(mp3_filename)[0] + ".wav"
+                    logger.debug(f"Boosting TTS volume by {boost_db} dB")
                     wav_file_path = os.path.join(TEMP_DOWNLOAD_DIR, wav_filename)
-                    sound.export(wav_file_path, format="wav")
+                    boosted_sound.export(wav_file_path, format="wav") # Export boosted sound
                     logger.info(f"converted tts audio to wav: {wav_file_path}")
 
                     # Queue the WAV file for playback
