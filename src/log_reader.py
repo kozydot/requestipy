@@ -274,15 +274,20 @@ class LogReader:
         self._event_bus.publish(EVENT_UNDEFINED_MESSAGE, message=line)
 
 
-    def start_monitoring(self):
-        """starts monitoring the log file in a separate thread."""
+    def start_monitoring(self) -> threading.Thread | None:
+        """
+        Starts monitoring the log file in a separate thread.
+
+        Returns:
+            The monitoring thread object if started successfully, None otherwise.
+        """
         if not self._log_path:
             logger.error("cannot start monitoring: log path is not configured correctly.")
-            return
+            return None
 
         if self._observer and self._observer.is_alive():
             logger.warning("monitoring is already active.")
-            return
+            return self._monitor_thread # Return existing thread if already running
 
         self._stop_event.clear()
         self._event_handler = LogFileEventHandler(self._log_path, self._process_line)
@@ -293,9 +298,10 @@ class LogReader:
         self._observer.schedule(self._event_handler, watch_dir, recursive=False)
 
         # start observer in a background thread
-        self._monitor_thread = threading.Thread(target=self._run_observer, daemon=True)
+        self._monitor_thread = threading.Thread(target=self._run_observer, daemon=True, name="LogReaderMonitorThread") # Give thread a name
         self._monitor_thread.start()
         logger.info(f"started monitoring log file: {self._log_path}")
+        return self._monitor_thread # Return the newly created thread
 
     def _run_observer(self):
         """internal method to run the observer loop and add polling."""

@@ -69,7 +69,7 @@ class PluginManager:
                     logger.debug(f"attempting to load plugin module: {module_spec} from {file_path}")
                     # use importlib to load the module
                     module = importlib.import_module(module_spec)
-                    importlib.reload(module) # useful for development/reloading
+                    # Removed importlib.reload(module) - generally safer for standard loading
 
                     plugin_info = PluginInfo(name=plugin_name, module=module, path=file_path)
                     logger.info(f"successfully loaded plugin module: {plugin_info.name} (v{plugin_info.version})")

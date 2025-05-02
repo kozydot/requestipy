@@ -1,12 +1,13 @@
 import sys
 import os
 import time
+import shutil
 import logging
 # add project root to path so we can import stuff easier
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
-from src.config import load_config
+from src.config import load_config, ConfigError # Import ConfigError
 from src.logger import setup_logging
 from src.event_bus import EventBus
 from src.core_commands import TEMP_DOWNLOAD_DIR # Import the temp dir path
@@ -52,17 +53,31 @@ def cleanup_temp_folder():
 
 def main():
     """main function to initialize and run requestipy."""
-    # load the config file first, kinda important
-    config = load_config()
-    if not config:
-        print("error: failed to load configuration. exiting.")
+    config = None # Initialize config to None
+    try:
+        # load and validate the config file first
+        config = load_config()
+        # Setup logging immediately after config load, using validated level
+        # Note: If logging setup itself fails, it might raise its own exception
+        setup_logging(config['log_level']) # Access directly, default applied in load_config
+        logging.info("Configuration loaded and validated.")
+        logging.info("Starting RequestiPy...")
+
+    except ConfigError as e:
+        # Log error using basic config if setup_logging hasn't run
+        logging.basicConfig(level=logging.ERROR) # Ensure errors are visible
+        logging.error(f"Configuration error: {e}")
+        print(f"error: Configuration error - {e}", file=sys.stderr) # Print to stderr
+        sys.exit(1)
+    except Exception as e:
+        # Catch any other unexpected errors during startup
+        logging.basicConfig(level=logging.ERROR)
+        logging.error(f"Unexpected error during startup: {e}", exc_info=True)
+        print(f"error: Unexpected error during startup - {e}", file=sys.stderr)
         sys.exit(1)
 
-    # set up logging using the config settings
-    setup_logging(config.get('log_level', 'INFO')) # default to info level if it's not in the config
-
-    logging.info("starting requestipy...")
-    logging.info("configuration loaded.")
+    # --- Proceed only if config loaded successfully ---
+    # (The try/except block above handles exit on failure)
 
     # get the main parts ready
     event_bus = EventBus()
@@ -80,19 +95,35 @@ def main():
     plugin_manager.load_plugins()
     logging.info("plugins loaded.")
 
-    # start watching the log file
-    log_reader.start_monitoring()
-    logging.info("log monitoring started.")
+    # start watching the log file and get the monitoring thread
+    monitor_thread = log_reader.start_monitoring()
+    if not monitor_thread:
+        logging.error("Failed to start log monitoring. Exiting.")
+        # Perform minimal cleanup if necessary before exiting
+        if 'audio_player' in locals() and audio_player:
+            audio_player.shutdown()
+        if 'plugin_manager' in locals() and plugin_manager:
+            plugin_manager.unload_plugins()
+        cleanup_temp_folder()
+        sys.exit(1)
 
-    # keep the main script running
+    logging.info("Log monitoring started.")
+
+    # keep the main script running using a sleep loop, responsive to KeyboardInterrupt
     try:
         while True:
+            # Keep the main thread alive but allow interrupts
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Received shutdown signal (KeyboardInterrupt)...")
+        # The finally block will handle the shutdown sequence
+    except Exception as e:
+        # Catch any other unexpected errors in the main loop
+        logging.error(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
     finally:
         # --- Shutdown Sequence ---
-        logging.info("Starting shutdown sequence...")
+        # Triggered by KeyboardInterrupt or unexpected error
+        logging.info("Initiating shutdown sequence...")
         # shut things down nicely, kinda in reverse order of startup
         if 'log_reader' in locals() and log_reader:
             log_reader.stop_monitoring()

@@ -292,31 +292,42 @@ def cmd_tts(user: Dict[str, Any], args: List[str]):
                 except Exception as convert_e:
                     logger.error(f"error converting mp3 to wav for '{mp3_file_path}': {convert_e}", exc_info=True)
                     # todo: notify user of conversion failure?
+                # This inner finally block handles cleanup after conversion attempt
                 finally:
                     # Clean up the intermediate MP3 file regardless of conversion success
-                    if os.path.exists(mp3_file_path):
+                    if mp3_file_path and os.path.exists(mp3_file_path):
                         try:
                             os.remove(mp3_file_path)
-                            logger.debug(f"cleaned up temporary mp3 file: {mp3_file_path}")
+                            logger.debug(f"Cleaned up temporary MP3 file: {mp3_file_path}")
                         except Exception as del_e:
-                            logger.error(f"error deleting temporary mp3 file {mp3_file_path}: {del_e}")
+                            logger.error(f"Error deleting temporary MP3 file {mp3_file_path}: {del_e}")
 
             else:
-                 logger.error(f"tts mp3 file path reported but not found after saving: {mp3_file_path}")
+                 logger.error(f"TTS MP3 file path reported but not found after saving: {mp3_file_path}")
 
         except gTTSError as e:
-             logger.error(f"gtts error generating speech for '{text_to_speak}': {e}", exc_info=True)
+             logger.error(f"gTTS error generating speech for '{text_to_speak}': {e}", exc_info=True)
              # todo: notify user of failure?
         except Exception as e:
-             logger.error(f"unexpected error during tts processing for '{text_to_speak}': {e}", exc_info=True)
+             logger.error(f"Unexpected error during TTS processing for '{text_to_speak}': {e}", exc_info=True)
              # todo: notify user of failure?
-             # Clean up potentially created files if error occurred before cleanup block
-             if mp3_file_path and os.path.exists(mp3_file_path):
-                 try: os.remove(mp3_file_path)
-                 except Exception: pass
-             if wav_file_path and os.path.exists(wav_file_path):
-                 try: os.remove(wav_file_path)
-                 except Exception: pass
+        # This outer finally block ensures cleanup attempt for both files regardless of where errors occurred
+        finally:
+            logger.debug(f"Running final cleanup for TTS thread (Text: '{text_to_speak[:30]}...')")
+            # Clean up MP3 if it still exists (might happen if error occurred before inner finally)
+            if mp3_file_path and os.path.exists(mp3_file_path):
+                try:
+                    os.remove(mp3_file_path)
+                    logger.debug(f"Cleaned up leftover temporary MP3 file: {mp3_file_path}")
+                except Exception as del_e:
+                    logger.error(f"Error deleting leftover temporary MP3 file {mp3_file_path}: {del_e}")
+            # Clean up WAV file if it exists
+            if wav_file_path and os.path.exists(wav_file_path):
+                try:
+                    os.remove(wav_file_path)
+                    logger.debug(f"Cleaned up temporary WAV file: {wav_file_path}")
+                except Exception as del_e:
+                    logger.error(f"Error deleting temporary WAV file {wav_file_path}: {del_e}")
 
 
     tts_thread = threading.Thread(target=generate_convert_and_play, daemon=True)
